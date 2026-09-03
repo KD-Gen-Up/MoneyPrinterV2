@@ -4,6 +4,7 @@ import zipfile
 import requests
 import platform
 import tempfile
+import subprocess
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -26,29 +27,24 @@ def _validate_https_url(url: str) -> str:
 def _safe_extract_audio_archive(archive_path: str, destination: str) -> None:
     destination_path = Path(destination).resolve()
     extracted_bytes = 0
-
     with zipfile.ZipFile(archive_path, "r") as zf:
         for member in zf.infolist():
             if member.is_dir():
                 continue
-
             name = member.filename.replace("\\", "/")
             basename = Path(name).name
             if not basename or not basename.lower().endswith(SAFE_AUDIO_EXTENSIONS):
                 warning(f"Skipping non-audio file in archive: {member.filename}")
                 continue
-
             target = (destination_path / name).resolve()
             try:
                 target.relative_to(destination_path)
             except ValueError:
                 warning(f"Skipping path outside Songs directory: {member.filename}")
                 continue
-
             extracted_bytes += member.file_size
             if extracted_bytes > MAX_EXTRACTED_BYTES:
                 raise ValueError("Archive expands beyond the configured size limit")
-
             target.parent.mkdir(parents=True, exist_ok=True)
             with zf.open(member, "r") as source, open(target, "wb") as output:
                 remaining = member.file_size
@@ -66,21 +62,9 @@ def close_running_selenium_instances() -> None:
     """Close running Firefox instances without invoking a shell."""
     try:
         info(" => Closing running Selenium instances...")
-        if platform.system() == "Windows":
-            subprocess_result = __import__("subprocess").run(
-                ["taskkill", "/f", "/im", "firefox.exe"],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        else:
-            subprocess_result = __import__("subprocess").run(
-                ["pkill", "firefox"],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        if subprocess_result.returncode in (0, 1):
+        command = ["taskkill", "/f", "/im", "firefox.exe"] if platform.system() == "Windows" else ["pkill", "firefox"]
+        result = subprocess.run(command, check=False, capture_output=True, text=True)
+        if result.returncode in (0, 1):
             success(" => Closed running Selenium instances.")
         else:
             warning(" => Could not close all Selenium instances.")
@@ -111,18 +95,12 @@ def fetch_songs() -> None:
         info(" => Fetching songs...")
         files_dir = Path(ROOT_DIR) / "Songs"
         files_dir.mkdir(parents=True, exist_ok=True)
-
-        existing_audio_files = [
-            p for p in files_dir.iterdir()
-            if p.is_file() and p.suffix.lower() in SAFE_AUDIO_EXTENSIONS
-        ]
-        if existing_audio_files:
+        if any(p.is_file() and p.suffix.lower() in SAFE_AUDIO_EXTENSIONS for p in files_dir.iterdir()):
             return
 
         configured_url = get_zip_url().strip()
         download_urls = [configured_url] if configured_url else []
         download_urls.extend(DEFAULT_SONG_ARCHIVE_URLS)
-
         if not download_urls:
             raise RuntimeError("No songs archive URL is configured")
 
@@ -137,7 +115,6 @@ def fetch_songs() -> None:
                     content_length = response.headers.get("Content-Length")
                     if content_length and int(content_length) > MAX_ARCHIVE_BYTES:
                         raise ValueError("Songs archive exceeds the configured download limit")
-
                     fd, archive_path = tempfile.mkstemp(prefix="songs-", suffix=".zip", dir=str(files_dir))
                     os.close(fd)
                     total = 0
@@ -151,9 +128,8 @@ def fetch_songs() -> None:
                             output.write(chunk)
 
                 with open(archive_path, "rb") as archive_file:
-                    if archive_file.read(4) != b"PK\\x03\\x04":
+                    if archive_file.read(4) != b"PK\x03\x04":
                         raise ValueError("Downloaded songs file is not a ZIP archive")
-
                 _safe_extract_audio_archive(archive_path, str(files_dir))
                 downloaded = True
                 success(f" => Downloaded Songs from {final_url}.")
@@ -166,7 +142,6 @@ def fetch_songs() -> None:
                         os.remove(archive_path)
                     except OSError:
                         pass
-
         if not downloaded:
             raise RuntimeError("Could not download a valid songs archive from any configured URL")
     except Exception as e:
