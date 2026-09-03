@@ -4,6 +4,7 @@ import io
 import ipaddress
 import os
 import re
+import shlex
 import socket
 import subprocess
 import zipfile
@@ -27,15 +28,14 @@ def _validate_public_http_url(url: str) -> str:
     parsed = urlparse(str(url).strip())
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ValueError("Only HTTP(S) URLs are allowed")
-    host = parsed.hostname
     try:
-        addresses = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        addresses = socket.getaddrinfo(parsed.hostname, None, type=socket.SOCK_STREAM)
         for address in addresses:
             ip = ipaddress.ip_address(address[4][0])
             if not ip.is_global:
-                raise ValueError(f"Refusing non-public URL target: {host}")
+                raise ValueError(f"Refusing non-public URL target: {parsed.hostname}")
     except socket.gaierror as exc:
-        raise ValueError(f"Could not resolve URL host: {host}") from exc
+        raise ValueError(f"Could not resolve URL host: {parsed.hostname}") from exc
     return str(url).strip()
 
 
@@ -94,11 +94,9 @@ class Outreach:
         if self._find_scraper_dir():
             info("=> Scraper already unzipped. Skipping unzip.")
             return
-
         response = _safe_get(zip_link, max_bytes=MAX_SCRAPER_ZIP_BYTES)
         if not response.content.startswith(b"PK"):
             raise ValueError("Configured scraper URL did not return a ZIP archive")
-
         total_extracted = 0
         destination = Path.cwd().resolve()
         with zipfile.ZipFile(io.BytesIO(response.content), "r") as archive:
@@ -159,15 +157,13 @@ class Outreach:
 
     def set_email_for_website(self, index: int, website: str, output_file: str):
         response = _safe_get(website)
-        email_pattern = r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}\b"
-        addresses = re.findall(email_pattern, response.text)
+        addresses = re.findall(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}\b", response.text)
         if not addresses:
             return
-        email = addresses[0]
         with open(output_file, "r", newline="", errors="ignore") as csvfile:
             items = list(csv.reader(csvfile))
         if 0 <= index < len(items):
-            items[index].append(email)
+            items[index].append(addresses[0])
         with open(output_file, "w", newline="", errors="ignore") as csvfile:
             csv.writer(csvfile).writerows(items)
 
@@ -189,12 +185,10 @@ class Outreach:
             return
         self.unzip_file(get_google_maps_scraper_zip_url())
         self.build_scraper()
-
         niche_path = Path(ROOT_DIR) / "niche.txt"
         output_path = get_results_cache_path()
         message_subject = get_outreach_message_subject()
         message_body_path = self._message_body_path()
-
         try:
             niche_path.write_text(self.niche, encoding="utf-8")
             self.run_scraper_with_args_for_30_seconds(
@@ -204,10 +198,8 @@ class Outreach:
             if not os.path.exists(output_path):
                 error(f" => Scraper output not found at {output_path}.")
                 return
-
             items = self.get_items_from_file(output_path)
             success(f" => Scraped {len(items)} items.")
-
             yag = yagmail.SMTP(
                 user=self.email_creds["username"],
                 password=self.email_creds["password"],
@@ -221,8 +213,7 @@ class Outreach:
                     if not website:
                         continue
                     response = _safe_get(website)
-                    email_addresses = re.findall(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}\b", response.text)
-                    if not email_addresses:
+                    if not re.findall(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}\b", response.text):
                         continue
                     receiver_email = fields[-1].strip()
                     if not EMAIL_RE.fullmatch(receiver_email):
